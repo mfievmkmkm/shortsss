@@ -6,6 +6,7 @@ import html
 import os
 import re
 import queue
+import shutil
 import threading
 import subprocess
 import tempfile
@@ -247,14 +248,23 @@ def render(story, style, folder):
     # Keep decoding and filter buffers small enough for constrained Railway workers.
     width, height, fps = 540, 960, 24
     for index, scene in enumerate(story['scenes']):
-        image = folder / f'art_{index}.png'
+        image = folder / f'art_{index}.jpg'
         speech = folder / f'voice_{index}.mp3'
         words = folder / f'caption_{index}.txt'
         clip = folder / f'clip_{index}.mp4'
         try:
             credits.append(make_image(scene, style, image, story.get('visual_bible',''), used_photos))
         except Exception as e:
-            raise RuntimeError(f'Кадр {index+1}, подбор фото: {e}') from e
+            print(f'Кадр {index+1}: фото не найдено; использую резервный кадр. {e}', flush=True)
+            if index:
+                previous = max(0, index - 2)
+                shutil.copyfile(folder / f'art_{previous}.jpg', image)
+                credits.append(dict(credits[previous]))
+            else:
+                subprocess.run(['ffmpeg','-y','-hide_banner','-loglevel','error',
+                    '-f','lavfi','-i','color=c=0x172536:s=540x960:r=1',
+                    '-frames:v','1','-c:v','mjpeg','-q:v','3',str(image)], check=True)
+                credits.append({'photographer':'Фон бота','license':'Собственный', 'url':''})
         try:
             make_voice(scene['voice'], speech)
         except Exception as e:
