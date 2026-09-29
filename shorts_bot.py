@@ -2,6 +2,7 @@
 """Telegram shorts generator: storyboard -> art -> speech -> FFmpeg -> preview."""
 import base64
 import json
+import html
 import os
 import re
 import queue
@@ -100,6 +101,30 @@ def screenplay(topic, style):
     return obj
 
 def make_image(scene, style, path, visual_bible='', used=None):
+    errors = []
+    if PEXELS_KEY:
+        try:
+            return pexels_image(scene, path, used)
+        except Exception as e:
+            errors.append('Pexels: ' + str(e)[:180])
+            print('Image source failed:', errors[-1], flush=True)
+    try:
+        return commons_image(scene, path, used)
+    except Exception as e:
+        errors.append('Wikimedia Commons: ' + str(e)[:180])
+        raise RuntimeError('Не удалось получить готовое фото. ' + ' | '.join(errors)) from e
+
+def download_photo(url, path, hosts):
+    if urllib.parse.urlparse(url).hostname not in hosts:
+        raise RuntimeError('Неожиданный адрес изображения')
+    req = urllib.request.Request(url, headers={'User-Agent': 'ShortsAgent/1.0 (editorial video bot; contact via Telegram)'})
+    with urllib.request.urlopen(req, timeout=90) as res:
+        data = res.read(12 * 1024 * 1024 + 1)
+    if len(data) > 12 * 1024 * 1024 or not data.startswith(b'\xff\xd8'):
+        raise RuntimeError('Ожидалось JPEG не больше 12 МБ')
+    path.write_bytes(data)
+
+def pexels_image(scene, path, used):
     if not PEXELS_KEY:
         raise RuntimeError('Нужен PEXELS_API_KEY для готовых изображений')
     query = scene['search'].strip()[:90]
@@ -113,14 +138,36 @@ def make_image(scene, style, path, visual_bible='', used=None):
     url = selected['src']['large2x']
     if urllib.parse.urlparse(url).hostname != 'images.pexels.com':
         raise RuntimeError('Неожиданный адрес фото Pexels')
-    with urllib.request.urlopen(url, timeout=90) as res:
-        data = res.read(12 * 1024 * 1024 + 1)
-    if len(data) > 12 * 1024 * 1024 or not data.startswith(b'\xff\xd8'):
-        raise RuntimeError('Pexels вернул неожиданный формат или слишком большой файл')
-    path.write_bytes(data)
+    download_photo(url, path, {'images.pexels.com'})
     if used is not None:
         used.add(selected['id'])
-    return {'photographer':selected.get('photographer',''), 'url':selected.get('url','')}
+    return {'photographer':selected.get('photographer',''), 'url':selected.get('url',''), 'license':'Pexels'}
+
+def commons_image(scene, path, used):
+    params = urllib.parse.urlencode({'action':'query','format':'json','formatversion':2,
+        'generator':'search','gsrsearch':scene['search'][:90], 'gsrnamespace':6,
+        'gsrlimit':20,'prop':'imageinfo','iiprop':'url|extmetadata|mime|size','iiurlwidth':1200})
+    result = request('https://commons.wikimedia.org/w/api.php?' + params,
+                     headers={'User-Agent':'ShortsAgent/1.0 (editorial video bot)'}, timeout=30)
+    allowed = {'CC0','Public domain','CC BY 4.0','CC BY-SA 4.0','CC BY 3.0','CC BY-SA 3.0'}
+    for page in result.get('query',{}).get('pages',[]):
+        info = (page.get('imageinfo') or [{}])[0]
+        meta = info.get('extmetadata') or {}
+        license_name = html.unescape(meta.get('LicenseShortName',{}).get('value',''))
+        url = info.get('thumburl') or info.get('url','')
+        if page.get('pageid') in (used or set()) or info.get('mime') != 'image/jpeg' or license_name not in allowed:
+            continue
+        try:
+            download_photo(url, path, {'upload.wikimedia.org'})
+        except Exception:
+            continue
+        if used is not None:
+            used.add(page['pageid'])
+        title = page.get('title','')
+        artist_html = meta.get('Artist',{}).get('value','')
+        artist = html.unescape(re.sub(r'<[^>]+>', '', artist_html)).strip()[:100] or title
+        return {'photographer':artist, 'url':info.get('descriptionurl','https://commons.wikimedia.org/wiki/'+urllib.parse.quote(title.replace(' ','_'))), 'license':license_name}
+    raise RuntimeError('Нет подходящего JPEG с разрешённой лицензией')
 
 def make_voice(line, path):
     r = ai('audio/speech', {'model':VOICE_MODEL, 'voice':VOICE, 'input':line,
@@ -151,8 +198,14 @@ def render(story, style, folder):
         speech = folder / f'voice_{index}.mp3'
         words = folder / f'caption_{index}.txt'
         clip = folder / f'clip_{index}.mp4'
-        credits.append(make_image(scene, style, image, story.get('visual_bible',''), used_photos))
-        make_voice(scene['voice'], speech)
+        try:
+            credits.append(make_image(scene, style, image, story.get('visual_bible',''), used_photos))
+        except Exception as e:
+            raise RuntimeError(f'Кадр {index+1}, подбор фото: {e}') from e
+        try:
+            make_voice(scene['voice'], speech)
+        except Exception as e:
+            raise RuntimeError(f'Кадр {index+1}, озвучка Polza: {e}') from e
         words.write_text(re.sub(r'[\r\n]+',' ',scene['screen'])[:36], encoding='utf-8')
         seconds = duration(speech) + 0.35
         frames = max(1, round(seconds * 30))
@@ -178,7 +231,7 @@ def process(chat, style, topic):
     with tempfile.TemporaryDirectory(prefix='shorts-', dir=STATE) as temp:
         path, credits = render(story, style, Path(temp))
         upload_video(chat, path, story['title'] + '\n\n' + story.get('caption',''))
-        send(chat, 'Фото: ' + '; '.join(f"{c['photographer']} — {c['url']}" for c in credits)[:3900])
+        send(chat, 'Фото и лицензии: ' + '; '.join(f"{c['photographer']} ({c['license']}) — {c['url']}" for c in credits)[:3900])
     send(chat, 'Черновик готов. Чтобы сделать другую версию: /new')
 
 def worker_loop():
@@ -196,8 +249,8 @@ def worker_loop():
             JOBS.task_done()
 
 def main():
-    if not BOT_TOKEN or not AI_KEY or not PEXELS_KEY or not ALLOWED:
-        raise SystemExit('Нужны TELEGRAM_BOT_TOKEN, POLZA_API_KEY, PEXELS_API_KEY и ALLOWED_USER_IDS')
+    if not BOT_TOKEN or not AI_KEY or not ALLOWED:
+        raise SystemExit('Нужны TELEGRAM_BOT_TOKEN, POLZA_API_KEY и ALLOWED_USER_IDS')
     threading.Thread(target=worker_loop, daemon=True).start()
     offset_file = STATE / 'offset.txt'
     offset = int(offset_file.read_text()) if offset_file.exists() else 0
