@@ -18,7 +18,7 @@ BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
 AI_KEY = os.getenv('POLZA_API_KEY', '')
 ALLOWED = {x.strip() for x in os.getenv('ALLOWED_USER_IDS', '').split(',') if x.strip()}
 TEXT_MODEL = os.getenv('TEXT_MODEL', 'openai/gpt-4o-mini')
-IMAGE_MODEL = os.getenv('IMAGE_MODEL', 'dall-e-3')
+IMAGE_MODEL = os.getenv('IMAGE_MODEL', 'openai/gpt-image-1.5')
 VOICE_MODEL = os.getenv('VOICE_MODEL', 'openai/gpt-4o-mini-tts')
 VOICE = os.getenv('VOICE', 'alloy')
 STATE = Path(os.getenv('STATE_DIR', './state'))
@@ -104,7 +104,7 @@ def make_image(scene, style, path, visual_bible=''):
            'fact':'clean editorial photography, tactile objects, realistic lighting',
            'list':'vibrant editorial collage, clear visual focus, realistic textures'}[style]
     prompt = f'Portrait 9:16 vertical composition. {art}. {scene["visual"]}. Series style bible: {visual_bible}. Consistent visual style. No words, no letters, no logos, no watermark. Center main subject; leave lower middle area calm for a caption.'
-    r = ai('images/generations', {'model': IMAGE_MODEL, 'prompt':prompt, 'size':os.getenv('IMAGE_SIZE', '1024x1792'), 'n':1, 'response_format':'b64_json'})
+    r = ai('images/generations', {'model': IMAGE_MODEL, 'prompt':prompt, 'size':os.getenv('IMAGE_SIZE', '1024x1536'), 'n':1, 'response_format':'b64_json'})
     data = r['data'][0]
     if data.get('b64_json'):
         path.write_bytes(base64.b64decode(data['b64_json']))
