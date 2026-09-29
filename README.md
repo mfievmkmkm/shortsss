@@ -1,6 +1,6 @@
 # Shorts Agent · Polza AI
 
-Автономный Telegram-бот для производства вертикальных черновиков 9:16. Пользователь выбирает «История», «Факт» или «Подборка» и пишет тему. Агент через Polza AI строит сценарий, выбирает один из трёх хуков, находит готовые фото Pexels или Wikimedia Commons и генерирует русскую озвучку. FFmpeg добавляет движение и крупные экранные фразы; MP4 возвращается в Telegram на просмотр. Ничего само в публичные каналы не отправляется.
+Автономный Telegram-бот для производства вертикальных черновиков 9:16. Пользователь выбирает «История», «Факт» или «Подборка» и пишет тему. Агент через Polza AI строит сценарий, выбирает один из трёх хуков, подбирает готовые фото Pexels, Pixabay или Wikimedia Commons и генерирует русскую озвучку. FFmpeg добавляет движение и крупные экранные фразы; MP4 возвращается в Telegram на просмотр. Ничего само в публичные каналы не отправляется.
 
 ## Первые три секунды
 
@@ -15,7 +15,7 @@
 ```
 Telegram → очередь (1 ролик одновременно, до 4 ожидают)
          → Polza Chat Completions (JSON сценария и visual bible)
-         → Pexels Search API → при отказе Wikimedia Commons (готовые фото)
+         → Pexels → Pixabay (если задан ключ) → Wikimedia Commons (готовые фото)
          → Polza Audio Speech (base64 MP3 на каждую сцену)
          → FFmpeg (1080×1920, движения, надписи, звук)
          → личное превью в Telegram
@@ -32,14 +32,15 @@ Variables:
 ```env
 TELEGRAM_BOT_TOKEN=токен_нового_бота
 POLZA_API_KEY=ключ_polza
-PEXELS_API_KEY=ключ_фотостока_Pexels_необязательно
+PEXELS_API_KEY=ключ_Pexels_необязательно
+PIXABAY_API_KEY=ключ_Pixabay_необязательно
 ALLOWED_USER_IDS=ваш_числовой_Telegram_ID
 TEXT_MODEL=openai/gpt-4o-mini
 VOICE_MODEL=openai/gpt-4o-mini-tts
 VOICE=alloy
 ```
 
-`ALLOWED_USER_IDS` обязателен; несколько ID пишутся через запятую. Ключи храните только в Railway Variables, не в GitHub. Polza используется для текста (`/api/v1/chat/completions`) и голоса (`/api/v1/audio/speech`); speech возвращает JSON с base64 аудио. Изображения берутся из Pexels; если он недоступен, бот пробует Wikimedia Commons с фильтром лицензий CC0, Public domain, CC BY или CC BY-SA. `PEXELS_API_KEY` необязателен, но без него используется только Wikimedia Commons. Ссылки и лицензии бот присылает рядом с роликом; для CC BY и CC BY-SA проверяйте авторство на странице оригинала перед публичным размещением. Платными остаются текст и голос Polza, а также Railway.
+`ALLOWED_USER_IDS` обязателен; несколько ID пишутся через запятую. Ключи храните только в Railway Variables, не в GitHub. Polza используется для текста (`/api/v1/chat/completions`) и голоса (`/api/v1/audio/speech`); speech возвращает JSON с base64 аудио. Изображения берутся из Pexels, затем Pixabay при заданном `PIXABAY_API_KEY`, затем Wikimedia Commons. Ключи обоих фотостоков необязательны. Wikimedia Commons проверяется по MIME и лицензиям CC0, Public domain, CC BY или CC BY-SA; поиск расширяется, если точная фраза не дала результата. Ссылки и лицензии бот присылает рядом с роликом; для CC BY и CC BY-SA проверяйте авторство на странице оригинала перед публичным размещением. Платными остаются текст и голос Polza, а также Railway.
 
 Локально: `python3 shorts_bot.py` при наличии FFmpeg, FFprobe и TTF шрифта с кириллицей. Старт через `/start`.
 
