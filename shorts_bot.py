@@ -18,7 +18,7 @@ BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
 AI_KEY = os.getenv('POLZA_API_KEY', '')
 ALLOWED = {x.strip() for x in os.getenv('ALLOWED_USER_IDS', '').split(',') if x.strip()}
 TEXT_MODEL = os.getenv('TEXT_MODEL', 'openai/gpt-4o-mini')
-IMAGE_MODEL = os.getenv('IMAGE_MODEL', 'openai/gpt-image-1.5')
+PEXELS_KEY = os.getenv('PEXELS_API_KEY', '')
 VOICE_MODEL = os.getenv('VOICE_MODEL', 'openai/gpt-4o-mini-tts')
 VOICE = os.getenv('VOICE', 'alloy')
 STATE = Path(os.getenv('STATE_DIR', './state'))
@@ -84,14 +84,14 @@ def chat_json(prompt):
 def screenplay(topic, style):
     prompt = f'''Создай сценарий вертикального видео 25–45 секунд. Тема: {topic}. Режим: {STYLES[style]}.
 Сначала придумай три РАЗНЫХ хука: открытая петля, резкое наблюдение, конкретная сцена. Выбери лучший, который понятен без контекста за 3 секунды. Не начинай со слов «а вы знали», «представьте», «сегодня поговорим». Не обещай того, чего ролик не раскроет.
-Верни только JSON: {{"title":"...","caption":"...","visual_bible":"постоянный стиль, эпоха, палитра, герой и детали одежды", "hook_options":["...","...","..."],"scenes":[{{"voice":"...","screen":"...","visual":"...","beat":"..."}}]}}.
-Сцена 0: хук из 3–7 слов, его voice можно произнести за 3 секунды; screen 1–4 слова; visual сразу показывает конфликт или странный предмет. Начинай действие без вступления. Далее каждые 3–6 секунд новая информация или визуальный поворот. Во всех сценах voice 1–2 короткие разговорные фразы, screen 1–4 слова, visual описывает конкретный кадр, beat задаёт монтажный акцент. Всего {6 if style != 'fact' else 5} сцен, не больше 105 слов озвучки. Финал закрывает вопрос, а не обрывается на пустом тизере.
+Верни только JSON: {{"title":"...","caption":"...","visual_bible":"постоянный стиль, эпоха, палитра, герой и детали одежды", "hook_options":["...","...","..."],"scenes":[{{"voice":"...","screen":"...","visual":"...","search":"2–5 English words for Pexels","beat":"..."}}]}}.
+Сцена 0: хук из 3–7 слов, его voice можно произнести за 3 секунды; screen 1–4 слова; visual сразу показывает конфликт или странный предмет. Начинай действие без вступления. Далее каждые 3–6 секунд новая информация или визуальный поворот. Во всех сценах voice 1–2 короткие разговорные фразы, screen 1–4 слова, visual описывает конкретный кадр, search — короткий запрос на английском для поиска РЕАЛЬНОЙ готовой фотографии на Pexels, beat задаёт монтажный акцент. Не требуй точного портрета исторической личности от фотостока. Всего {6 if style != 'fact' else 5} сцен, не больше 105 слов озвучки. Финал закрывает вопрос, а не обрывается на пустом тизере.
 Русский разговорный язык, без канцелярита, списков при режиме истории, пафоса, повтора одних и тех же вводных фраз. Если тема фактологическая и источников нет, избегай точных цифр, цитат и неподтверждённых подробностей; не выдавай вымысел за факт. Реклама только по явному запросу.'''
     obj = chat_json(prompt)
     if not isinstance(obj.get('scenes'), list) or not 4 <= len(obj['scenes']) <= 8:
         raise ValueError('Некорректное число сцен')
     for s in obj['scenes']:
-        if not all(isinstance(s.get(k), str) and s[k].strip() for k in ('voice','screen','visual')):
+        if not all(isinstance(s.get(k), str) and s[k].strip() for k in ('voice','screen','visual','search')):
             raise ValueError('Некорректная сцена')
     if len(obj['scenes'][0]['voice'].split()) > 7 or len(obj['scenes'][0]['screen'].split()) > 4:
         raise ValueError('Хук слишком длинный для первых трёх секунд')
@@ -99,20 +99,28 @@ def screenplay(topic, style):
         raise ValueError('Сценарий слишком длинный')
     return obj
 
-def make_image(scene, style, path, visual_bible=''):
-    art = {'story':'rich atmospheric editorial illustration, cinematic lighting, painterly realism',
-           'fact':'clean editorial photography, tactile objects, realistic lighting',
-           'list':'vibrant editorial collage, clear visual focus, realistic textures'}[style]
-    prompt = f'Portrait 9:16 vertical composition. {art}. {scene["visual"]}. Series style bible: {visual_bible}. Consistent visual style. No words, no letters, no logos, no watermark. Center main subject; leave lower middle area calm for a caption.'
-    r = ai('images/generations', {'model': IMAGE_MODEL, 'prompt':prompt, 'size':os.getenv('IMAGE_SIZE', '1024x1536'), 'n':1, 'response_format':'b64_json'})
-    data = r['data'][0]
-    if data.get('b64_json'):
-        path.write_bytes(base64.b64decode(data['b64_json']))
-    elif data.get('url'):
-        with urllib.request.urlopen(data['url'], timeout=120) as res:
-            path.write_bytes(res.read())
-    else:
-        raise ValueError('Polza не вернула изображение')
+def make_image(scene, style, path, visual_bible='', used=None):
+    if not PEXELS_KEY:
+        raise RuntimeError('Нужен PEXELS_API_KEY для готовых изображений')
+    query = scene['search'].strip()[:90]
+    params = urllib.parse.urlencode({'query':query, 'orientation':'portrait', 'per_page':20})
+    result = request('https://api.pexels.com/v1/search?' + params,
+                     headers={'Authorization': PEXELS_KEY}, timeout=30)
+    photos = result.get('photos') or []
+    selected = next((p for p in photos if p.get('id') not in (used or set()) and p.get('src',{}).get('large2x')), None)
+    if not selected:
+        raise RuntimeError(f'На Pexels нет подходящего кадра: {query}')
+    url = selected['src']['large2x']
+    if urllib.parse.urlparse(url).hostname != 'images.pexels.com':
+        raise RuntimeError('Неожиданный адрес фото Pexels')
+    with urllib.request.urlopen(url, timeout=90) as res:
+        data = res.read(12 * 1024 * 1024 + 1)
+    if len(data) > 12 * 1024 * 1024 or not data.startswith(b'\xff\xd8'):
+        raise RuntimeError('Pexels вернул неожиданный формат или слишком большой файл')
+    path.write_bytes(data)
+    if used is not None:
+        used.add(selected['id'])
+    return {'photographer':selected.get('photographer',''), 'url':selected.get('url','')}
 
 def make_voice(line, path):
     r = ai('audio/speech', {'model':VOICE_MODEL, 'voice':VOICE, 'input':line,
@@ -136,12 +144,14 @@ def render(story, style, folder):
     if not Path(font).is_file():
         raise RuntimeError('Укажите путь к TTF шрифту в FONT_PATH')
     clips = []
+    credits = []
+    used_photos = set()
     for index, scene in enumerate(story['scenes']):
         image = folder / f'art_{index}.png'
         speech = folder / f'voice_{index}.mp3'
         words = folder / f'caption_{index}.txt'
         clip = folder / f'clip_{index}.mp4'
-        make_image(scene, style, image, story.get('visual_bible',''))
+        credits.append(make_image(scene, style, image, story.get('visual_bible',''), used_photos))
         make_voice(scene['voice'], speech)
         words.write_text(re.sub(r'[\r\n]+',' ',scene['screen'])[:36], encoding='utf-8')
         seconds = duration(speech) + 0.35
@@ -160,14 +170,15 @@ def render(story, style, folder):
     output = folder / 'short.mp4'
     subprocess.run(['ffmpeg','-y','-hide_banner','-loglevel','error','-f','concat','-safe','0','-i',str(concat),
                     '-c','copy','-movflags','+faststart',str(output)],check=True)
-    return output
+    return output, credits
 
 def process(chat, style, topic):
     send(chat, 'Пишу сценарий и собираю сцены. Это может занять несколько минут.')
     story = screenplay(topic, style)
     with tempfile.TemporaryDirectory(prefix='shorts-', dir=STATE) as temp:
-        path = render(story, style, Path(temp))
+        path, credits = render(story, style, Path(temp))
         upload_video(chat, path, story['title'] + '\n\n' + story.get('caption',''))
+        send(chat, 'Фото: ' + '; '.join(f"{c['photographer']} — {c['url']}" for c in credits)[:3900])
     send(chat, 'Черновик готов. Чтобы сделать другую версию: /new')
 
 def worker_loop():
@@ -185,8 +196,8 @@ def worker_loop():
             JOBS.task_done()
 
 def main():
-    if not BOT_TOKEN or not AI_KEY or not ALLOWED:
-        raise SystemExit('Нужны TELEGRAM_BOT_TOKEN, POLZA_API_KEY и ALLOWED_USER_IDS')
+    if not BOT_TOKEN or not AI_KEY or not PEXELS_KEY or not ALLOWED:
+        raise SystemExit('Нужны TELEGRAM_BOT_TOKEN, POLZA_API_KEY, PEXELS_API_KEY и ALLOWED_USER_IDS')
     threading.Thread(target=worker_loop, daemon=True).start()
     offset_file = STATE / 'offset.txt'
     offset = int(offset_file.read_text()) if offset_file.exists() else 0
