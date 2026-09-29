@@ -34,8 +34,8 @@ TELEGRAM_BOT_TOKEN=токен_нового_бота
 POLZA_API_KEY=ключ_polza
 ALLOWED_USER_IDS=ваш_числовой_Telegram_ID
 TEXT_MODEL=openai/gpt-4o-mini
-IMAGE_MODEL=dall-e-3
-IMAGE_SIZE=1024x1792
+IMAGE_MODEL=openai/gpt-image-1.5
+IMAGE_SIZE=1024x1536
 VOICE_MODEL=openai/gpt-4o-mini-tts
 VOICE=alloy
 ```
