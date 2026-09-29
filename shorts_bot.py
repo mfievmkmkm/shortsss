@@ -20,6 +20,8 @@ AI_KEY = os.getenv('POLZA_API_KEY', '')
 ALLOWED = {x.strip() for x in os.getenv('ALLOWED_USER_IDS', '').split(',') if x.strip()}
 TEXT_MODEL = os.getenv('TEXT_MODEL', 'openai/gpt-4o-mini')
 PEXELS_KEY = os.getenv('PEXELS_API_KEY', '')
+PIXABAY_KEY = os.getenv('PIXABAY_API_KEY', '')
+PEXELS_BLOCKED = False
 VOICE_MODEL = os.getenv('VOICE_MODEL', 'openai/gpt-4o-mini-tts')
 VOICE = os.getenv('VOICE', 'alloy')
 STATE = Path(os.getenv('STATE_DIR', './state'))
@@ -101,12 +103,21 @@ def screenplay(topic, style):
     return obj
 
 def make_image(scene, style, path, visual_bible='', used=None):
+    global PEXELS_BLOCKED
     errors = []
-    if PEXELS_KEY:
+    if PEXELS_KEY and not PEXELS_BLOCKED:
         try:
             return pexels_image(scene, path, used)
         except Exception as e:
             errors.append('Pexels: ' + str(e)[:180])
+            print('Image source failed:', errors[-1], flush=True)
+            if '1010' in str(e):
+                PEXELS_BLOCKED = True
+    if PIXABAY_KEY:
+        try:
+            return pixabay_image(scene, path, used)
+        except Exception as e:
+            errors.append('Pixabay: ' + str(e)[:180])
             print('Image source failed:', errors[-1], flush=True)
     try:
         return commons_image(scene, path, used)
@@ -132,7 +143,7 @@ def pexels_image(scene, path, used):
     result = request('https://api.pexels.com/v1/search?' + params,
                      headers={'Authorization': PEXELS_KEY}, timeout=30)
     photos = result.get('photos') or []
-    selected = next((p for p in photos if p.get('id') not in (used or set()) and p.get('src',{}).get('large2x')), None)
+    selected = next((p for p in photos if ('pexels',p.get('id')) not in (used or set()) and p.get('src',{}).get('large2x')), None)
     if not selected:
         raise RuntimeError(f'На Pexels нет подходящего кадра: {query}')
     url = selected['src']['large2x']
@@ -140,34 +151,67 @@ def pexels_image(scene, path, used):
         raise RuntimeError('Неожиданный адрес фото Pexels')
     download_photo(url, path, {'images.pexels.com'})
     if used is not None:
-        used.add(selected['id'])
+        used.add(('pexels', selected['id']))
     return {'photographer':selected.get('photographer',''), 'url':selected.get('url',''), 'license':'Pexels'}
 
+def pixabay_image(scene, path, used):
+    params = urllib.parse.urlencode({'key':PIXABAY_KEY, 'q':scene['search'][:90],
+        'image_type':'photo', 'orientation':'vertical', 'safesearch':'true', 'per_page':30})
+    result = request('https://pixabay.com/api/?' + params, timeout=30)
+    for item in result.get('hits',[]):
+        if ('pixabay',item.get('id')) in (used or set()):
+            continue
+        url = item.get('largeImageURL') or item.get('webformatURL')
+        if not url:
+            continue
+        try:
+            download_photo(url, path, {'pixabay.com','cdn.pixabay.com'})
+        except Exception:
+            continue
+        if used is not None:
+            used.add(('pixabay',item['id']))
+        return {'photographer':item.get('user','Pixabay'), 'url':item.get('pageURL',''), 'license':'Pixabay Content License'}
+    raise RuntimeError('Нет доступного JPEG по запросу')
+
 def commons_image(scene, path, used):
-    params = urllib.parse.urlencode({'action':'query','format':'json','formatversion':2,
-        'generator':'search','gsrsearch':scene['search'][:90], 'gsrnamespace':6,
-        'gsrlimit':20,'prop':'imageinfo','iiprop':'url|extmetadata|mime|size','iiurlwidth':1200})
-    result = request('https://commons.wikimedia.org/w/api.php?' + params,
-                     headers={'User-Agent':'ShortsAgent/1.0 (editorial video bot)'}, timeout=30)
-    allowed = {'CC0','Public domain','CC BY 4.0','CC BY-SA 4.0','CC BY 3.0','CC BY-SA 3.0'}
-    for page in result.get('query',{}).get('pages',[]):
+    phrase = scene['search'].strip()[:90]
+    words = phrase.split()
+    queries = [phrase]
+    if len(words) > 2:
+        queries.append(' '.join(words[:2]))
+    if len(words) > 1:
+        queries.append(words[-1])
+    for query in dict.fromkeys(queries):
+        params = urllib.parse.urlencode({'action':'query','format':'json','formatversion':2,
+            'generator':'search','gsrsearch':query, 'gsrnamespace':6,
+            'gsrlimit':30,'prop':'imageinfo','iiprop':'url|extmetadata|mime|size','iiurlwidth':1200})
+        result = request('https://commons.wikimedia.org/w/api.php?' + params,
+                         headers={'User-Agent':'ShortsAgent/1.0 (editorial video bot)'}, timeout=30)
+        for page in result.get('query',{}).get('pages',[]):
+            credit = commons_candidate(page, path, used)
+            if credit:
+                return credit
+    raise RuntimeError('Нет подходящего JPEG с разрешённой лицензией')
+
+def commons_candidate(page, path, used):
         info = (page.get('imageinfo') or [{}])[0]
         meta = info.get('extmetadata') or {}
         license_name = html.unescape(meta.get('LicenseShortName',{}).get('value',''))
         url = info.get('thumburl') or info.get('url','')
-        if page.get('pageid') in (used or set()) or info.get('mime') != 'image/jpeg' or license_name not in allowed:
-            continue
+        normalized = license_name.lower().replace('-', ' ').replace('  ',' ')
+        allowed = normalized.startswith(('cc by ', 'cc by sa ', 'cc0', 'public domain', 'pd '))
+        if ('commons',page.get('pageid')) in (used or set()) or info.get('mime') != 'image/jpeg' or not allowed:
+            return None
         try:
             download_photo(url, path, {'upload.wikimedia.org'})
         except Exception:
-            continue
+            return None
         if used is not None:
-            used.add(page['pageid'])
+            used.add(('commons',page['pageid']))
         title = page.get('title','')
         artist_html = meta.get('Artist',{}).get('value','')
         artist = html.unescape(re.sub(r'<[^>]+>', '', artist_html)).strip()[:100] or title
         return {'photographer':artist, 'url':info.get('descriptionurl','https://commons.wikimedia.org/wiki/'+urllib.parse.quote(title.replace(' ','_'))), 'license':license_name}
-    raise RuntimeError('Нет подходящего JPEG с разрешённой лицензией')
 
 def make_voice(line, path):
     r = ai('audio/speech', {'model':VOICE_MODEL, 'voice':VOICE, 'input':line,
