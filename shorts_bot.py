@@ -228,7 +228,14 @@ def duration(path):
 
 def caption_filter(words, font):
     # drawtext escaping is awkward; a separate text file avoids injected FFmpeg expressions.
-    return f"drawtext=fontfile='{font}':textfile='{words}':reload=0:fontcolor=white:fontsize=70:borderw=5:bordercolor=black:x=(w-text_w)/2:y=h*0.73-text_h/2"
+    return f"drawtext=fontfile='{font}':textfile='{words}':reload=0:fontcolor=white:fontsize=40:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h*0.73-text_h/2"
+
+def caption_lines(value):
+    words = re.sub(r'[\r\n]+', ' ', value).split()
+    if len(' '.join(words)) <= 16 or len(words) < 2:
+        return ' '.join(words)[:36]
+    middle = max(1, len(words)//2)
+    return ' '.join(words[:middle])[:18] + '\n' + ' '.join(words[middle:])[:18]
 
 def render(story, style, folder):
     font = os.getenv('FONT_PATH', '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf')
@@ -237,6 +244,8 @@ def render(story, style, folder):
     clips = []
     credits = []
     used_photos = set()
+    # Keep decoding and filter buffers small enough for constrained Railway workers.
+    width, height, fps = 540, 960, 24
     for index, scene in enumerate(story['scenes']):
         image = folder / f'art_{index}.png'
         speech = folder / f'voice_{index}.mp3'
@@ -250,16 +259,17 @@ def render(story, style, folder):
             make_voice(scene['voice'], speech)
         except Exception as e:
             raise RuntimeError(f'Кадр {index+1}, озвучка Polza: {e}') from e
-        words.write_text(re.sub(r'[\r\n]+',' ',scene['screen'])[:36], encoding='utf-8')
+        words.write_text(caption_lines(scene['screen']), encoding='utf-8')
         seconds = duration(speech) + 0.35
-        frames = max(1, round(seconds * 30))
-        vf = (f'scale=1180:2100:force_original_aspect_ratio=increase,crop=1180:2100,'
-              f'zoompan=z=\'min(zoom+0.0007,1.10)\':d={frames}:s=1080x1920:fps=30,'
+        frames = max(1, round(seconds * fps))
+        vf = (f'scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},'
+              f'zoompan=z=\'min(zoom+0.001,1.08)\':d={frames}:s={width}x{height}:fps={fps},'
               f'{caption_filter(words, font)},format=yuv420p')
-        subprocess.run(['ffmpeg','-y','-hide_banner','-loglevel','error','-loop','1','-i',str(image),
+        subprocess.run(['ffmpeg','-y','-hide_banner','-loglevel','error','-threads','1','-filter_threads','1',
+                        '-loop','1','-i',str(image),
                         '-i',str(speech),'-filter_complex',f'[0:v]{vf}[v];[1:a]apad=pad_dur=0.35[a]',
                         '-map','[v]','-map','[a]','-t',f'{seconds:.3f}',
-                        '-c:v','libx264','-preset','veryfast','-crf','24','-r','30','-c:a','aac','-b:a','128k',
+                        '-c:v','libx264','-threads','1','-preset','ultrafast','-crf','23','-r',str(fps),'-c:a','aac','-b:a','128k',
                         '-movflags','+faststart',str(clip)],check=True)
         clips.append(clip)
     concat = folder / 'concat.txt'
